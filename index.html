@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GoogleフォームのZIPファイルをCSV UTF-8(BOM)へ変換</title>
+    <!-- 外部ライブラリ: JSZip (ZIPファイルの解凍に使用) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f0f2f5;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .container {
+            width: 100%;
+            max-width: 600px;
+            background: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        #drop-area {
+            border: 2px dashed #9ca3af;
+            border-radius: 8px;
+            padding: 40px 20px;
+            text-align: center;
+            background-color: #f9fafb;
+            color: #6b7280;
+            transition: background-color 0.2s, border-color 0.2s;
+            cursor: pointer;
+            margin-bottom: 20px;
+        }
+        #drop-area.dragover {
+            background-color: #e0f2fe;
+            border-color: #3b82f6;
+            color: #1d4ed8;
+        }
+        #log-area {
+            width: 100%;
+            height: 150px;
+            background-color: #f1f5f9;
+            border: 1px solid #cbd5e1;
+            border-radius: 4px;
+            padding: 10px;
+            font-size: 12px;
+            resize: vertical;
+            box-sizing: border-box;
+        }
+        #file-input {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2 style="margin-top: 0;">GoogleフォームのZIPファイルの変換</h2>
+    <p style="font-size: 14px; color: #555;">Googleフォーム等のCSV/ZIPファイルをドラッグ＆ドロップしてください。<br>※ZIPファイルは解凍され、変換済みのCSVのみがそのままの名前でダウンロードされます。</p>
+
+    <div id="drop-area">
+        ここにCSVまたはZIPファイルをドラッグ＆ドロップ<br>
+        <span style="font-size: 12px;">（またはクリックしてファイルを選択）</span>
+    </div>
+    <input type="file" id="file-input" accept=".csv, .zip" multiple>
+
+    <textarea id="log-area" readonly></textarea>
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const dropArea = document.getElementById('drop-area');
+        const fileInput = document.getElementById('file-input');
+        const logArea = document.getElementById('log-area');
+
+        const log = (message) => {
+            const time = new Date().toLocaleTimeString();
+            logArea.value += `[${time}] ${message}\n`;
+            logArea.scrollTop = logArea.scrollHeight;
+        };
+
+        log("システム準備完了。ファイルをドロップしてください。");
+
+        dropArea.addEventListener('click', () => fileInput.click());
+        
+        dropArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropArea.classList.add('dragover');
+        });
+
+        dropArea.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            dropArea.classList.remove('dragover');
+        });
+
+        dropArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropArea.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) {
+                handleFiles(e.dataTransfer.files);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFiles(e.target.files);
+            }
+            fileInput.value = '';
+        });
+
+        const handleFiles = (files) => {
+            const fileArray = Array.from(files);
+            for (const file of fileArray) {
+                const extension = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
+                
+                if (extension === '.csv') {
+                    processCsvFile(file);
+                } else if (extension === '.zip') {
+                    processZipFile(file);
+                } else {
+                    log(`警告: [${file.name}] は未対応の形式です。スキップします。`);
+                }
+            }
+        };
+
+        const processCsvFile = (file) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const text = e.target.result;
+                
+                if (!validateCsvStructure(text)) {
+                    log(`警告: [${file.name}] フォーマットエラー - ダブルクォーテーションの数が不一致です。`);
+                    return;
+                }
+
+                // _BOMを付けず、元のファイル名のままダウンロード
+                downloadAsUtf8Bom(text, file.name);
+                log(`成功: [${file.name}] をBOM付きでダウンロードしました。`);
+            };
+            reader.onerror = () => log(`エラー: [${file.name}] の読み込みに失敗しました。`);
+            reader.readAsText(file, 'UTF-8');
+        };
+
+        const processZipFile = async (file) => {
+            log(`処理中: [${file.name}] からCSVを抽出し、変換を行います...`);
+            try {
+                const zip = await JSZip.loadAsync(file);
+                let csvFound = false;
+
+                for (const relativePath in zip.files) {
+                    const zipEntry = zip.files[relativePath];
+                    
+                    if (!zipEntry.dir && relativePath.toLowerCase().endsWith('.csv')) {
+                        csvFound = true;
+                        const text = await zipEntry.async("string");
+                        
+                        if (!validateCsvStructure(text)) {
+                            log(`警告: ZIP内の [${relativePath}] はフォーマットエラーのためスキップしました。`);
+                            continue;
+                        }
+
+                        // ZIP内の元のファイル名だけを取り出し、そのままダウンロード
+                        const originalFileName = relativePath.split('/').pop();
+                        downloadAsUtf8Bom(text, originalFileName);
+                        log(`成功: [${originalFileName}] を抽出・変換してダウンロードしました。`);
+                        
+                        // 複数ファイルの連続ダウンロードでブラウザがブロックするのを防ぐ待機処理
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                    }
+                }
+
+                if (!csvFound) {
+                    log(`警告: [${file.name}] の中にCSVファイルが見つかりませんでした。`);
+                    return;
+                }
+
+                log(`完了: 対象のCSVファイルをすべてダウンロードしました。`);
+
+            } catch (error) {
+                log(`致命的なエラー: [${file.name}] のZIP処理中に例外が発生 - ${error.message}`);
+            }
+        };
+
+        const validateCsvStructure = (text) => {
+            let quoteCount = 0;
+            for (let i = 0; i < text.length; i++) {
+                if (text[i] === '"') quoteCount++;
+            }
+            return quoteCount % 2 === 0;
+        };
+
+        const downloadAsUtf8Bom = (text, fileName) => {
+            const bomText = '\uFEFF' + text;
+            const blob = new Blob([bomText], { type: 'text/csv;charset=utf-8;' });
+            triggerDownload(blob, fileName);
+        };
+
+        const triggerDownload = (blob, fileName) => {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = fileName;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        };
+    });
+</script>
+</body>
+</html>
